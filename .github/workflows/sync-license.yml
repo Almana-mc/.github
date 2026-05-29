@@ -67,17 +67,17 @@ jobs:
                 sha_arg=(-f "sha=${sha}")
               fi
 
-              if gh api -X PUT "repos/${repo}/contents/${TARGET_FILE}" \
+              if err="$(gh api -X PUT "repos/${repo}/contents/${TARGET_FILE}" \
                    -f message="$COMMIT_MESSAGE" \
                    -f content="$license_b64" \
                    -f branch="$branch" \
-                   "${sha_arg[@]}" >/dev/null 2>&1; then
+                   "${sha_arg[@]}" 2>&1 >/dev/null)"; then
                 if [ -n "$sha" ]; then
                   echo "license overridden: ${repo} (${branch})"
                 else
                   echo "license added: ${repo} (${branch})"
                 fi
               else
-                echo "failed: ${repo} could not write ${TARGET_FILE} on ${branch}"
+                echo "failed: ${repo} on ${branch}: $(echo "$err" | tr '\n' ' ')"
               fi
             done
