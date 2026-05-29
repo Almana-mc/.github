@@ -1,0 +1,76 @@
+name: Sync organization license
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 * * * *"
+
+jobs:
+  sync-license:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.ORG_FILE_SYNC_TOKEN }}
+      ORG: Almana-mc
+      SOURCE_REPO: Almana-mc/.github
+      SOURCE_FILE: LICENSE.md
+      TARGET_FILE: LICENSE.md
+      COMMIT_MESSAGE: Add organization license
+    steps:
+      - name: Copy license into repos missing one
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Source license content, already base64 from the Contents API.
+          license_b64="$(gh api "repos/${SOURCE_REPO}/contents/${SOURCE_FILE}" -q .content | tr -d '\n')"
+          if [ -z "$license_b64" ]; then
+            echo "failed: could not read source ${SOURCE_REPO}/${SOURCE_FILE}"
+            exit 1
+          fi
+
+          candidates="LICENSE.md LICENSE LICENSE.txt license.md license"
+
+          # name<TAB>isArchived<TAB>defaultBranch per repo.
+          gh repo list "$ORG" --limit 1000 \
+            --json name,isArchived,defaultBranchRef \
+            -q '.[] | [.name, (.isArchived|tostring), (.defaultBranchRef.name // "")] | @tsv' \
+          | while IFS=$'\t' read -r name archived branch; do
+              repo="${ORG}/${name}"
+
+              if [ "$repo" = "$SOURCE_REPO" ]; then
+                echo "skip source: ${repo}"
+                continue
+              fi
+
+              if [ "$archived" = "true" ]; then
+                echo "skip archived: ${repo}"
+                continue
+              fi
+
+              has_license=false
+              for f in $candidates; do
+                if gh api "repos/${repo}/contents/${f}" --silent >/dev/null 2>&1; then
+                  has_license=true
+                  break
+                fi
+              done
+
+              if [ "$has_license" = true ]; then
+                echo "already has license: ${repo}"
+                continue
+              fi
+
+              if [ -z "$branch" ]; then
+                echo "failed: ${repo} has no default branch (empty repo)"
+                continue
+              fi
+
+              if gh api -X PUT "repos/${repo}/contents/${TARGET_FILE}" \
+                   -f message="$COMMIT_MESSAGE" \
+                   -f content="$license_b64" \
+                   -f branch="$branch" >/dev/null 2>&1; then
+                echo "license added: ${repo} (${branch})"
+              else
+                echo "failed: ${repo} could not create ${TARGET_FILE} on ${branch}"
+              fi
+            done
