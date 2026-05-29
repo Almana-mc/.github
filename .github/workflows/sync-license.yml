@@ -2,8 +2,10 @@ name: Sync organization license
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "0 * * * *"
+  # Fire from an org webhook relay (POST repos/Almana-mc/.github/dispatches)
+  # when a new repository is created. Actions cannot listen org-wide directly.
+  repository_dispatch:
+    types: [repo-created]
 
 jobs:
   sync-license:
@@ -28,8 +30,6 @@ jobs:
             exit 1
           fi
 
-          candidates="LICENSE.md LICENSE LICENSE.txt license.md license"
-
           # name<TAB>isArchived<TAB>defaultBranch per repo.
           gh repo list "$ORG" --limit 1000 \
             --json name,isArchived,defaultBranchRef \
@@ -47,30 +47,37 @@ jobs:
                 continue
               fi
 
-              has_license=false
-              for f in $candidates; do
-                if gh api "repos/${repo}/contents/${f}" --silent >/dev/null 2>&1; then
-                  has_license=true
-                  break
-                fi
-              done
-
-              if [ "$has_license" = true ]; then
-                echo "already has license: ${repo}"
-                continue
-              fi
-
               if [ -z "$branch" ]; then
                 echo "failed: ${repo} has no default branch (empty repo)"
                 continue
               fi
 
+              # Existing LICENSE.md sha + content (empty if absent).
+              existing="$(gh api "repos/${repo}/contents/${TARGET_FILE}" 2>/dev/null || true)"
+              sha="$(echo "$existing" | jq -r '.sha // empty')"
+              current_b64="$(echo "$existing" | jq -r '.content // empty' | tr -d '\n')"
+
+              if [ -n "$sha" ] && [ "$current_b64" = "$license_b64" ]; then
+                echo "already in sync: ${repo}"
+                continue
+              fi
+
+              sha_arg=()
+              if [ -n "$sha" ]; then
+                sha_arg=(-f "sha=${sha}")
+              fi
+
               if gh api -X PUT "repos/${repo}/contents/${TARGET_FILE}" \
                    -f message="$COMMIT_MESSAGE" \
                    -f content="$license_b64" \
-                   -f branch="$branch" >/dev/null 2>&1; then
-                echo "license added: ${repo} (${branch})"
+                   -f branch="$branch" \
+                   "${sha_arg[@]}" >/dev/null 2>&1; then
+                if [ -n "$sha" ]; then
+                  echo "license overridden: ${repo} (${branch})"
+                else
+                  echo "license added: ${repo} (${branch})"
+                fi
               else
-                echo "failed: ${repo} could not create ${TARGET_FILE} on ${branch}"
+                echo "failed: ${repo} could not write ${TARGET_FILE} on ${branch}"
               fi
             done
