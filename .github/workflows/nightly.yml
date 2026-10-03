@@ -1,0 +1,93 @@
+name: Nightly
+
+on:
+  workflow_call:
+    secrets:
+      MAVEN_USERNAME:
+        required: true
+      MAVEN_TOKEN:
+        required: true
+      DISCORD_DEV_WEBHOOK:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish dev build
+    runs-on: ubuntu-latest
+    concurrency:
+      group: nightly-${{ github.repository }}-${{ github.ref }}
+      cancel-in-progress: true
+    env:
+      DISCORD_DEV_WEBHOOK: ${{ secrets.DISCORD_DEV_WEBHOOK }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Resolve dev version
+        id: meta
+        shell: bash
+        env:
+          BRANCH: ${{ github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          prop() { awk -F= -v k="$1" '$1 == k { print $2 }' gradle.properties | tr -d '\r'; }
+
+          mod_version="$(prop mod_version)"
+          if [[ "$BRANCH" == "$DEFAULT_BRANCH" || "$BRANCH" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+            dev_version="${mod_version}-SNAPSHOT"
+          else
+            dev_version="${mod_version}-${BRANCH//[^A-Za-z0-9.]/-}-SNAPSHOT"
+          fi
+
+          java_version="$(grep -ohE 'JavaLanguageVersion\.of\([0-9]+\)' build.gradle* | grep -oE '[0-9]+' | head -n1 || true)"
+          mod_name="$(prop mod_name)"
+
+          {
+            echo "dev_version=$dev_version"
+            echo "java_version=${java_version:-21}"
+            echo "mod_name=${mod_name:-${GITHUB_REPOSITORY#*/}}"
+            echo "minecraft_version=$(prop minecraft_version)"
+            echo "browse_url=https://maven.almanax21.com/#/snapshots/$(prop mod_group_id | tr . /)/$(prop mod_id)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Set up JDK
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: ${{ steps.meta.outputs.java_version }}
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Build and publish
+        shell: bash
+        env:
+          DEV_VERSION: ${{ steps.meta.outputs.dev_version }}
+          ORG_GRADLE_PROJECT_almanaUsername: ${{ secrets.MAVEN_USERNAME }}
+          ORG_GRADLE_PROJECT_almanaPassword: ${{ secrets.MAVEN_TOKEN }}
+        run: |
+          chmod +x ./gradlew
+          ./gradlew build publish -Pmod_version="$DEV_VERSION" --console=plain
+
+      - name: Notify Discord
+        if: env.DISCORD_DEV_WEBHOOK != ''
+        shell: bash
+        env:
+          BRANCH: ${{ github.ref_name }}
+          COMMIT_URL: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}
+          DEV_VERSION: ${{ steps.meta.outputs.dev_version }}
+          MOD_NAME: ${{ steps.meta.outputs.mod_name }}
+          MINECRAFT_VERSION: ${{ steps.meta.outputs.minecraft_version }}
+          BROWSE_URL: ${{ steps.meta.outputs.browse_url }}
+        run: |
+          subject="$(git log -1 --format=%s)"
+          content="**${MOD_NAME}** dev build \`${DEV_VERSION}\` for MC ${MINECRAFT_VERSION}
+          Branch \`${BRANCH}\` · [\`${GITHUB_SHA::7}\`](<${COMMIT_URL}>) ${subject}
+          Download: <${BROWSE_URL}>"
+
+          jq -n --arg content "$content" '{content: $content, allowed_mentions: {parse: []}}' \
+            | curl --fail --silent --show-error -H "Content-Type: application/json" -d @- "$DISCORD_DEV_WEBHOOK"
